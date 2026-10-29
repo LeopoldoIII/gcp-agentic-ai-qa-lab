@@ -4,6 +4,34 @@ This guide provides a rapid-fire summary of the **12 highest-signal technical in
 
 ---
 
+## ⚡ Fast-Track Cheat Sheet: 24-Hour Emergency Interview Prep
+
+If your interview is tomorrow morning, **memorize this 1-page section first**. It gives you the core narrative, the 3 highest-probability questions with 2-sentence answers, and an ace-in-the-hole pitch.
+
+### 1. The 60-Second Elevator Pitch (Memorize This)
+> *"I specialize in testing serverless Agentic AI pipelines on GCP, typically following the **Cloud Scheduler $\rightarrow$ Cloud Run $\rightarrow$ BigQuery** pattern.*
+>
+> *My QA approach targets two critical layers:*
+> 1. ***Agentic Behavior & Reliability:*** *I don't just check for HTTP 200s; I audit the **tool-calling trajectory** to ensure the agent invokes policy and catalog tools in the mandatory sequence, and I assert **groundedness** so the model never hallucinates approved refunds exceeding the original purchase total.*
+> 2. ***BigQuery Data Integrity:*** *I run automated SQL reconciliation queries to guarantee zero silent data loss, verify **idempotency** so Cloud Scheduler retries don't duplicate financial rows, and ensure every decision has an auditable trace log."*
+
+### 2. The 3 "Golden" Questions (Answer in 2 Sentences)
+
+#### Q(A). "How do you test an Agentic AI workflow to know it's working properly?"
+> *"I test it on two dimensions: **process** and **outcome**. For the process, I validate the tool trajectory to guarantee required deterministic tools were called in order before approval; for the outcome, I assert schema compliance and numerical groundedness so approved amounts never exceed ground-truth catalog bounds."*
+
+#### Q(B). "What specific tests do you run between Cloud Scheduler, Cloud Run, and BigQuery?"
+> *"I focus on **idempotency** and **cross-table SQL reconciliation**. I verify that Cloud Scheduler retries carrying the same `job_run_id` return an idempotent skip rather than inserting duplicate decisions, and I execute SQL `LEFT JOIN` queries between raw tickets and decisions to detect any unprocessed or orphan records."*
+
+#### Q(C). "Have you used AI tools for test-case generation, and how do you handle them?"
+> *"Yes, I feed business requirement specs and schemas into LLMs to generate test matrices covering edge cases and boundary conditions. However, I **never run AI-generated tests blindly**—I enforce a **Human-in-the-Loop (HITL) review gate** to catch and correct contradictory oracles or hallucinated requirements before any test enters the automated suite."*
+
+### 3. Your "Ace-in-the-Hole" Pitch
+If the interviewer asks: *"Do you have hands-on experience or a working example of this?"*, answer:
+> *"Yes, in fact, I built and maintain a local GCP test lab simulating a Cloud Run FastAPI service with an agentic refund workflow, a BigQuery analytical layer, and an automated Pytest suite of 17 tests covering Cloud Scheduler idempotency, tool-trajectory verification, SQL reconciliation, and HITL governance."*
+
+---
+
 ## Pillar 1: Testing Agentic AI Workflows
 
 ### Q1. How does testing an Agentic AI workflow differ from testing a traditional deterministic microservice?
