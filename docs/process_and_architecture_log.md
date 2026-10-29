@@ -75,3 +75,92 @@ Implemented in [`src/qa_ai_generator.py`](../src/qa_ai_generator.py):
    - Records `APPROVED` (`AI-TC-001`, `AI-TC-002`, `AI-TC-003`, `AI-TC-005`), `EDITED_BY_HUMAN` (`AI-TC-004` after fixing `expected_max_refund=0.0`), and `REJECTED` (`AI-TC-006`).
 5. **Coverage & Live Execution**: Confirms `100.0%` requirement coverage across `REQ-001`..`REQ-005` and executes the 5 validated test cases against the FastAPI Cloud Run service.
 
+---
+
+## 6. Deep Dive: GCP Serverless Triad Lifecycle & Failure Modes
+
+This section documents the architectural relationship between **Cloud Scheduler**, **Cloud Run**, and **BigQuery**, clarifying where the agent lives, the 5-step lifecycle, and the three critical failure points tested in this project.
+
+### 6.1 The Serverless Triad Roles
+- **Cloud Scheduler ("The Trigger / Clock")**: A serverless cron service that initiates batch jobs via HTTPS requests. It carries trigger metadata (e.g., `X-CloudScheduler: true`, `X-CloudScheduler-JobName`) and guarantees *at-least-once delivery*.
+- **Cloud Run ("The Brain / Compute Container")**: A serverless containerized execution environment hosting the FastAPI application, the Agentic Orchestrator, the deterministic tool implementations, and data transformation logic.
+- **BigQuery ("The Memory / Analytical Warehouse")**: High-performance analytical storage acting as both the **source** (retrieving pending tickets and catalog orders) and the **destination** (persisting decisions and tool audit trajectories).
+
+### 6.2 Where Does the Agent Live?
+A common architectural misconception is assuming the entire LLM lives inside Cloud Run. In production GCP architectures:
+- **Inside Cloud Run (Microservice Container)**:
+  1. The **Agent Orchestrator** ([`src/agent_workflow.py`](../src/agent_workflow.py)): Manages execution flow, calls tools, and tracks state.
+  2. The **Deterministic Business Tools** (`fetch_order_details`, `evaluate_refund_policy`, `calculate_refund_cap`): Real Python functions connecting to databases and business logic.
+  3. **Guardrails & Persistence Adapters**: Schema validators, financial caps, and BigQuery connectors.
+- **Outside Cloud Run (Managed GCP AI Services)**:
+  - The foundation model (e.g., **Gemini 1.5 Pro on Vertex AI**). Cloud Run sends HTTPS/gRPC requests with prompt instructions and tool definitions; Vertex AI returns structured tool calls (`"call evaluate_refund_policy with args..."`).
+
+### 6.3 The Complete 5-Step Lifecycle
+The pipeline does not terminate upon reading from BigQuery; it completes a full round-trip:
+1. **Trigger**: Cloud Scheduler sends `POST /scheduler/trigger` with `job_run_id`.
+2. **Context Retrieval (Read)**: Cloud Run queries BigQuery (`SELECT` from `raw_tickets` and `orders_catalog`).
+3. **Agentic Reasoning & Tool Execution**: Cloud Run orchestrates tool calls, checking policies and computing refund caps.
+4. **Analytical Persistence (Write - Crucial Step)**: Cloud Run writes structured outcomes into `agent_decisions` and granular tool invocation steps into `agent_traces`.
+5. **Lifecycle Acknowledgment**: Cloud Run returns `HTTP 200 OK` (with `processed_count`) to Cloud Scheduler.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CS as Cloud Scheduler (Trigger)
+    participant CR as Cloud Run (FastAPI + Agent Orchestrator)
+    participant LLM as Vertex AI / Gemini (External LLM)
+    participant BQ as BigQuery (Analytical Storage)
+
+    CS->>CR: 1. POST /scheduler/trigger (job_run_id)
+    CR->>BQ: 2. SELECT pending tickets & orders
+    BQ-->>CR: Return records
+    CR->>LLM: 3a. Prompt + Available Tools
+    LLM-->>CR: 3b. Request Tool Call (e.g. evaluate_refund_policy)
+    CR->>CR: 3c. Execute Python Tool
+    CR->>BQ: 4. INSERT into agent_decisions & agent_traces
+    BQ-->>CR: Ingestion status
+    CR-->>CS: 5. HTTP 200 OK (Job Summary)
+```
+
+### 6.4 The Three Critical Failure Points & QA Mitigation
+
+#### 1. BigQuery Write Failure & Silent HTTP 200s (Step 4 Failure)
+- **Defect**: BigQuery streaming inserts (`insert_rows_json()`) return a list of row-level errors instead of raising an HTTP exception. If unhandled, Cloud Run mistakenly returns `HTTP 200 OK`, causing silent data loss.
+- **QA Strategy**:
+  - Test HTTP error contracts: verify that write errors trigger `HTTP 500` or logged alerts.
+  - SQL Completeness Reconciliation:
+    ```sql
+    SELECT r.ticket_id FROM raw_tickets r
+    LEFT JOIN agent_decisions d ON r.ticket_id = d.ticket_id
+    WHERE d.ticket_id IS NULL;
+    ```
+
+#### 2. Partial Writes / Lost Audit Trajectory
+- **Defect**: The service persists the decision to `agent_decisions` but fails before writing to `agent_traces`, leaving high-stakes AI decisions without auditable tool trajectory logs.
+- **QA Strategy**:
+  - Orphan records SQL check:
+    ```sql
+    SELECT d.ticket_id, d.status, COUNT(t.trace_id) AS trace_steps
+    FROM agent_decisions d
+    LEFT JOIN agent_traces t ON d.ticket_id = t.ticket_id
+    GROUP BY d.ticket_id, d.status
+    HAVING COUNT(t.trace_id) = 0;
+    ```
+
+#### 3. Cloud Scheduler Retries & Duplicate Decisions
+- **Defect**: Cloud Scheduler retries on cold starts or network timeouts. Without idempotency, duplicate decisions and multiple refund records are inserted into BigQuery.
+- **QA Strategy**:
+  - Validate idempotency keys: Cloud Run checks `has_processed_job_run(job_run_id)` and returns `idempotent_skip: true`.
+  - SQL Uniqueness Reconciliation:
+    ```sql
+    SELECT ticket_id, COUNT(*) AS decision_count
+    FROM agent_decisions
+    GROUP BY ticket_id
+    HAVING COUNT(*) > 1;
+    ```
+
+### 6.5 Terminal Warnings vs. Intentional QA Faults
+- **Deprecation Warning (`StarletteDeprecationWarning`)**: A non-blocking library warning regarding `httpx` in the test client. All 17 unit/integration tests pass cleanly.
+- **RCA Demo Output (`python -m src.rca_demo`)**: Displays intentional negative fault-injection scenarios (`hallucination`, `skipped_tool`, `data_discrepancy`) designed to demonstrate that our QA assertion layer and SQL reconciliation queries immediately flag and diagnose production defects.
+
+

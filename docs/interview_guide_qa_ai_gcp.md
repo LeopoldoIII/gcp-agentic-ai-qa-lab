@@ -49,6 +49,20 @@ This guide provides a rapid-fire summary of the **12 highest-signal technical in
   - Use a **Hybrid Storage Adapter pattern** (`BQ_MODE=local` vs `BQ_MODE=floci` vs `BQ_MODE=gcp`).
   - Fast PR checks run against an in-memory SQLite/DuckDB analytical engine in milliseconds; pre-production integration tests run against an emulator or ephemeral BigQuery dataset with TTL expiration.
 
+### Q6b. Where does the Agent actually live, and does the process terminate once BigQuery responds with data?
+- **What the interviewer wants to hear**:
+  - **Where the Agent lives**: The agent is split into two layers:
+    1. **Inside Cloud Run**: The **Orchestrator** (`agent_workflow.py`), state manager, database connectors, deterministic business tools (`fetch_order_details`, `evaluate_refund_policy`, `calculate_refund_cap`), and post-processing guardrails.
+    2. **Outside Cloud Run (Managed GCP AI)**: The foundation model (Vertex AI / Gemini API) called over HTTPS to determine tool selection and probabilistic reasoning.
+  - **Does the process end upon BigQuery query response? No.** The workflow executes a 5-step round trip:
+    1. *Trigger* (Cloud Scheduler `POST`),
+    2. *Context Read* (Cloud Run queries BigQuery `raw_tickets` & `orders_catalog`),
+    3. *Reasoning & Tool Execution* (Cloud Run invokes business tools and LLM),
+    4. *Analytical Persistence (Crucial)*: Cloud Run writes back decisions to `agent_decisions` and tool trajectories to `agent_traces` in BigQuery,
+    5. *HTTP Acknowledgment*: Cloud Run returns `HTTP 200 OK` to Cloud Scheduler.
+  - Crucial QA insight: Step 4 is where silent write failures, partial writes, and duplicate insertions occur.
+- **Repo Reference**: [`docs/process_and_architecture_log.md#6`](./process_and_architecture_log.md).
+
 ---
 
 ## Pillar 3: Data Integrity, Reconciliation & Root Cause Analysis (RCA)
